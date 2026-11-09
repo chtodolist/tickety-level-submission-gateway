@@ -1,8 +1,8 @@
-
 {
   "name": "tickety-level-submission-gateway",
   "version": "1.0.0",
-  "description": "Tickety application webhook gateway",
+  "private": true,
+  "description": "Tickety application webhook gateway for PSHS Demonlist submissions",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
