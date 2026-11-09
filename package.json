@@ -2,12 +2,15 @@
   "name": "tickety-level-submission-gateway",
   "version": "1.0.0",
   "private": true,
-  "description": "Tickety application webhook gateway for PSHS Demonlist submissions",
+  "description": "Forwards accepted Tickety level applications to the PSHS Demonlist Apps Script queue.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
-    "express": "^5.1.0"
+    "express": "^4.21.2"
   }
 }

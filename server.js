@@ -1,116 +1,112 @@
-const express = require("express");
+'use strict';
+
+const express = require('express');
+const crypto = require('crypto');
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: '1mb' }));
 
-const PORT = process.env.PORT || 10000;
-const TICKETY_TOKEN = process.env.TICKETY_TOKEN || "";
-const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL || "";
-const GATEWAY_SECRET = process.env.GATEWAY_SECRET || "";
+const PORT = Number(process.env.PORT || 3000);
+const TICKETY_TOKEN = String(process.env.TICKETY_TOKEN || '').trim();
+const GATEWAY_SECRET = String(process.env.GATEWAY_SECRET || '').trim();
+const APPS_SCRIPT_URL = String(process.env.APPS_SCRIPT_URL || '').trim();
 
-app.get("/", (_req, res) => {
-  res.status(200).json({
-    status: "online",
-    service: "Tickety Level Submission Gateway"
-  });
-});
-
-function getPayload(req) {
-  const body = req.body || {};
-  return {
-    eventType: String(body.type || ""),
-    payload: body.payload && typeof body.payload === "object" ? body.payload : body
-  };
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a || ''), 'utf8');
+  const right = Buffer.from(String(b || ''), 'utf8');
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
 }
 
-function isAuthorized(req) {
-  const supplied = String(req.get("authorization") || "").trim();
-  const normalized = supplied.replace(/^Bearer\s+/i, "");
-  return Boolean(TICKETY_TOKEN) && normalized === TICKETY_TOKEN;
+function authorizedTickety(req) {
+  const header = String(req.get('authorization') || '').trim();
+  const supplied = header.replace(/^Bearer\s+/i, '').trim();
+  return Boolean(TICKETY_TOKEN && supplied && safeEqual(supplied, TICKETY_TOKEN));
 }
 
-async function sendToAppsScript(data) {
-  if (!APPS_SCRIPT_URL) throw new Error("APPS_SCRIPT_URL is not configured.");
-  if (!GATEWAY_SECRET) throw new Error("GATEWAY_SECRET is not configured.");
+async function sendToAppsScript(body) {
+  if (!APPS_SCRIPT_URL || !GATEWAY_SECRET) {
+    throw new Error('Gateway is missing APPS_SCRIPT_URL or GATEWAY_SECRET environment variables.');
+  }
 
   const response = await fetch(APPS_SCRIPT_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...data, gatewayToken: GATEWAY_SECRET }),
-    redirect: "follow"
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ...body, gatewaySecret: GATEWAY_SECRET })
   });
 
-  const text = await response.text();
+  const responseText = await response.text();
   let result;
   try {
-    result = JSON.parse(text);
-  } catch (_error) {
-    throw new Error(`Apps Script returned non-JSON (HTTP ${response.status}): ${text.slice(0, 500)}`);
+    result = JSON.parse(responseText);
+  } catch (_) {
+    throw new Error(`Apps Script returned non-JSON (HTTP ${response.status}).`);
   }
 
-  if (!response.ok || result.status !== "ok") {
-    throw new Error(`Apps Script rejected the event (HTTP ${response.status}): ${result.message || text}`);
+  if (!response.ok || !result || result.status !== 'ok') {
+    const message = result && (result.message || result.error);
+    throw new Error(message || `Apps Script request failed (HTTP ${response.status}).`);
   }
-
   return result;
 }
 
-app.post("/tickety-webhook", async (req, res) => {
-  if (!isAuthorized(req)) {
-    return res.status(401).json({ status: "error", message: "Unauthorized webhook request." });
+app.get('/', (_req, res) => {
+  res.json({ status: 'online', service: 'Tickety Level Submission Gateway' });
+});
+
+app.post('/tickety-webhook', async (req, res) => {
+  if (!authorizedTickety(req)) {
+    return res.status(401).json({ status: 'error', message: 'Unauthorized webhook request.' });
   }
 
-  const { eventType, payload } = getPayload(req);
-  const applicationId = String(payload.applicationId || "").trim();
+  const event = req.body || {};
+  const type = String(event.type || '').trim();
+  const payload = event.payload || {};
+  const applicationId = String(payload.applicationId || '').trim();
 
-  if (!eventType) {
-    return res.status(400).json({ status: "error", message: "Missing Tickety event type." });
+  if (!applicationId) {
+    return res.status(400).json({ status: 'error', message: 'Missing applicationId.' });
   }
 
   try {
-    if (eventType === "application.submit") {
-      if (!applicationId || !Array.isArray(payload.questions)) {
-        return res.status(400).json({ status: "error", message: "Submit event is missing applicationId or questions." });
-      }
-
+    if (type === 'application.submit') {
+      // Save the full submitted application. Accept events only contain metadata.
       const result = await sendToAppsScript({
-        type: "tickety_pending",
+        type: 'tickety_store',
         applicationId,
-        submitDate: payload.submitDate || "",
-        application: payload
+        payload
       });
-
-      console.log(`Stored Tickety application.submit: ${applicationId}`);
-      return res.status(200).json({ status: "ok", message: result.message });
+      return res.status(200).json({ status: 'ok', action: 'stored', result: result.message });
     }
 
-    if (eventType === "application.accept") {
-      if (!applicationId) {
-        return res.status(400).json({ status: "error", message: "Accept event is missing applicationId." });
-      }
-
+    if (type === 'application.accept') {
       const result = await sendToAppsScript({
-        type: "tickety_accept",
+        type: 'tickety_accept',
         applicationId
       });
-
-      console.log(`Processed Tickety application.accept: ${applicationId}`);
-      return res.status(200).json({ status: "ok", message: result.message });
+      return res.status(200).json({ status: 'ok', action: 'forwarded', result: result.message });
     }
 
-    if (eventType === "application.deny") {
-      console.log(`Ignored Tickety application.deny: ${applicationId || "unknown application"}`);
-      return res.status(200).json({ status: "ok", message: "Denied applications are ignored." });
+    if (type === 'application.deny') {
+      const result = await sendToAppsScript({
+        type: 'tickety_deny',
+        applicationId
+      });
+      return res.status(200).json({ status: 'ok', action: 'discarded', result: result.message });
     }
 
-    console.log(`Ignored unsupported Tickety event: ${eventType}`);
-    return res.status(200).json({ status: "ok", message: "Event ignored." });
+    // Ignore other event types so they cannot create queue entries.
+    return res.status(200).json({ status: 'ok', action: 'ignored', event: type || 'unknown' });
   } catch (error) {
-    console.error(`Tickety webhook processing failed (${eventType}, ${applicationId}):`, error.message);
-    return res.status(500).json({ status: "error", message: error.message });
+    console.error('Tickety webhook processing failed:', error.message);
+    return res.status(502).json({ status: 'error', message: error.message });
   }
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Tickety gateway listening on ${PORT}`);
+app.use((error, _req, res, _next) => {
+  console.error('Request error:', error.message);
+  res.status(400).json({ status: 'error', message: 'Invalid request body.' });
+});
+
+app.listen(PORT, () => {
+  console.log(`Tickety Level Submission Gateway listening on port ${PORT}`);
 });
